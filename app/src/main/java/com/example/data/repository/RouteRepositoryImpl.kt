@@ -2,14 +2,8 @@ package com.example.data.repository
 
 import android.util.Log
 import com.example.BuildConfig
-import com.example.data.remote.ComputeRoutesRequestDto
-import com.example.data.remote.GoogleRoutesApiService
-import com.example.data.remote.LatLngDto
-import com.example.data.remote.LocationDto
-import com.example.data.remote.RouteDto
 import com.example.data.remote.TomTomCalculatedRouteDto
 import com.example.data.remote.TomTomRoutingApiService
-import com.example.data.remote.WaypointDto
 import com.example.data.util.PolylineDecoder
 import com.example.domain.model.LatLngPoint
 import com.example.domain.model.RaahiRoute
@@ -33,18 +27,12 @@ import kotlin.math.sqrt
 
 class RouteRepositoryImpl(
     private val tomTomApiService: TomTomRoutingApiService? = null,
-    private val googleApiService: GoogleRoutesApiService? = null,
     private val customTomTomApiKey: String? = null,
-    private val customGoogleApiKey: String? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : RouteRepository {
 
     private val tomTomApi: TomTomRoutingApiService by lazy {
         tomTomApiService ?: createDefaultTomTomApiService()
-    }
-
-    private val googleRoutesApi: GoogleRoutesApiService by lazy {
-        googleApiService ?: createDefaultGoogleApiService()
     }
 
     override suspend fun getRouteOptions(
@@ -56,8 +44,9 @@ class RouteRepositoryImpl(
         val tomtomApiKey = getTomTomApiKey()
 
         // 1. Attempt TomTom Routing API first when key is available
-        if (!tomtomApiKey.isNullOrBlank() && tomtomApiKey != "YOUR_TOMTOM_API_KEY") {
+        if (!tomtomApiKey.isNullOrBlank()) {
             try {
+                logInfo(TAG, "Attempting route calculation via TomTom Routing API...")
                 val locations = "${origin.latitude},${origin.longitude}:${destination.latitude},${destination.longitude}"
                 val response = tomTomApi.calculateRoute(
                     locations = locations,
@@ -83,113 +72,50 @@ class RouteRepositoryImpl(
                                 destinationName = destinationName
                             )
                         }
+                        logInfo(TAG, "SUCCESS: TomTom Routing API returned ${domainRoutes.size} routes. Points per route: ${domainRoutes.map { "${it.title}: ${it.polylinePoints.size} points" }}")
                         return@withContext Result.success(domainRoutes)
                     } else {
-                        logWarn(TAG, "TomTom Routing API returned 0 routes. Falling back to Karachi route model.")
+                        logWarn(TAG, "TOMTOM FALLBACK TRIGGERED: TomTom Routing API returned 0 routes. Falling back to Karachi Corridor Engine.")
                     }
                 } else {
                     val errorBody = response.errorBody()?.string().orEmpty()
-                    logWarn(TAG, "TomTom Routing API returned response code ${response.code()}: $errorBody. Falling back to alternative routing.")
+                    logError(TAG, "TOMTOM FALLBACK TRIGGERED: TomTom Routing API returned HTTP ${response.code()}: $errorBody. Falling back to Karachi Corridor Engine.")
                 }
             } catch (e: Throwable) {
-                logWarn(TAG, "Notice: TomTom calculateRoute API call unavailable (${e.message ?: "network unreachable"}). Proceeding with fallback.")
+                logError(TAG, "TOMTOM FALLBACK TRIGGERED: TomTom calculateRoute API call failed (${e.message ?: "network error"}). Falling back to Karachi Corridor Engine.")
             }
         } else {
-            logWarn(TAG, "TomTom API Key not found in BuildConfig or environment. Checking secondary providers.")
+            logWarn(TAG, "TOMTOM FALLBACK TRIGGERED: TomTom API Key missing or invalid. Falling back to Karachi Corridor Engine.")
         }
 
-        // 2. Secondary check: Google Routes API (if configured)
-        val googleApiKey = getGoogleApiKey()
-        if (!googleApiKey.isNullOrBlank() && googleApiKey != "YOUR_MAPS_API_KEY" && googleApiKey != "MY_GEMINI_API_KEY") {
-            try {
-                val request = ComputeRoutesRequestDto(
-                    origin = WaypointDto(
-                        location = LocationDto(
-                            latLng = LatLngDto(
-                                latitude = origin.latitude,
-                                longitude = origin.longitude
-                            )
-                        )
-                    ),
-                    destination = WaypointDto(
-                        location = LocationDto(
-                            latLng = LatLngDto(
-                                latitude = destination.latitude,
-                                longitude = destination.longitude
-                            )
-                        )
-                    ),
-                    travelMode = "DRIVE",
-                    routingPreference = "TRAFFIC_AWARE",
-                    computeAlternativeRoutes = true,
-                    languageCode = "en-US",
-                    units = "METRIC"
-                )
-
-                val response = googleRoutesApi.computeRoutes(
-                    apiKey = googleApiKey,
-                    fieldMask = "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.description,routes.warnings,routes.legs",
-                    request = request
-                )
-
-                if (response.isSuccessful) {
-                    val body = response.body()
-                    val routesList = body?.routes
-                    if (!routesList.isNullOrEmpty()) {
-                        val domainRoutes = routesList.mapIndexed { index, routeDto ->
-                            mapGoogleDtoToDomain(
-                                routeDto = routeDto,
-                                index = index,
-                                origin = origin,
-                                destination = destination,
-                                originName = originName,
-                                destinationName = destinationName
-                            )
-                        }
-                        return@withContext Result.success(domainRoutes)
-                    }
-                }
-            } catch (e: Throwable) {
-                logWarn(TAG, "Google computeRoutes API call unavailable (${e.message ?: "network unreachable"}).")
-            }
-        }
-
-        // 3. Graceful fallback: Verified Karachi Route Network Calculation
+        // 2. Graceful fallback: Verified Karachi Route Network Calculation
         calculateKarachiRouteNetwork(origin, destination, originName, destinationName)
     }
 
     private fun getTomTomApiKey(): String? {
-        if (customTomTomApiKey != null) {
-            return customTomTomApiKey.takeIf {
-                it.isNotBlank() && it != "YOUR_TOMTOM_API_KEY" && it != "bY9a4eA7apw13sQgjuxm3gLAujnnfGhz"
+        if (!customTomTomApiKey.isNullOrBlank()) {
+            val trimmed = customTomTomApiKey.trim()
+            if (!KNOWN_INVALID_DEMO_KEYS.contains(trimmed)) {
+                return trimmed
             }
         }
+
+        // 1. Try direct access to generated BuildConfig.TOMTOM_API_KEY
+        val buildConfigKey = try {
+            BuildConfig.TOMTOM_API_KEY.trim()
+        } catch (e: Throwable) {
+            null
+        }
+
+        if (!buildConfigKey.isNullOrBlank() && !KNOWN_INVALID_DEMO_KEYS.contains(buildConfigKey)) {
+            return buildConfigKey
+        }
+
+        // 2. Reflection fallback
         return try {
             val keyField = BuildConfig::class.java.getField("TOMTOM_API_KEY")
-            val key = keyField.get(null) as? String
-            if (!key.isNullOrBlank() && key != "YOUR_TOMTOM_API_KEY" && key != "bY9a4eA7apw13sQgjuxm3gLAujnnfGhz") key else null
-        } catch (e: Throwable) {
-            null
-        }
-    }
-
-    private fun getGoogleApiKey(): String? {
-        if (customGoogleApiKey != null) {
-            return customGoogleApiKey.takeIf { it.isNotBlank() && it != "YOUR_MAPS_API_KEY" && it != "YOUR_ROUTES_API_KEY" }
-        }
-        val routesKey = try {
-            val keyField = BuildConfig::class.java.getField("ROUTES_API_KEY")
-            val key = keyField.get(null) as? String
-            if (!key.isNullOrBlank() && key != "YOUR_ROUTES_API_KEY") key else null
-        } catch (e: Throwable) {
-            null
-        }
-        if (routesKey != null) return routesKey
-
-        return try {
-            val keyField = BuildConfig::class.java.getField("MAPS_API_KEY")
-            val key = keyField.get(null) as? String
-            if (!key.isNullOrBlank() && key != "YOUR_MAPS_API_KEY") key else null
+            val key = (keyField.get(null) as? String)?.trim()
+            if (!key.isNullOrBlank() && !KNOWN_INVALID_DEMO_KEYS.contains(key)) key else null
         } catch (e: Throwable) {
             null
         }
@@ -288,74 +214,6 @@ class RouteRepositoryImpl(
             legs = legs,
             warnings = emptyList(),
             metadata = mapOf("provider" to "TomTom")
-        )
-    }
-
-    private fun mapGoogleDtoToDomain(
-        routeDto: RouteDto,
-        index: Int,
-        origin: LatLngPoint,
-        destination: LatLngPoint,
-        originName: String,
-        destinationName: String
-    ): RaahiRoute {
-        val distanceMeters = routeDto.distanceMeters ?: calculateApproxDistance(origin, destination)
-        val durationSeconds = parseDurationSeconds(routeDto.duration)
-        val encodedPoly = routeDto.polyline?.encodedPolyline.orEmpty()
-        val decodedPoints = if (encodedPoly.isNotEmpty()) {
-            PolylineDecoder.decode(encodedPoly)
-        } else {
-            generateDirectKarachiPolyline(origin, destination, index)
-        }
-
-        val routeTitle = when {
-            !routeDto.description.isNullOrBlank() -> "Via ${routeDto.description}"
-            index == 0 -> "Primary Route"
-            index == 1 -> "Alternative Route 1"
-            else -> "Alternative Route $index"
-        }
-
-        val legs = routeDto.legs?.map { legDto ->
-            val legDistance = legDto.distanceMeters ?: distanceMeters
-            val legDuration = parseDurationSeconds(legDto.duration)
-            RaahiRouteLeg(
-                distanceMeters = legDistance,
-                durationSeconds = legDuration,
-                formattedDistance = formatDistance(legDistance),
-                formattedDuration = formatDuration(legDuration),
-                startLocation = legDto.startLocation?.latLng?.let { LatLngPoint(it.latitude, it.longitude) } ?: origin,
-                endLocation = legDto.endLocation?.latLng?.let { LatLngPoint(it.latitude, it.longitude) } ?: destination,
-                steps = legDto.steps?.map { stepDto ->
-                    val stepDist = stepDto.distanceMeters ?: 0
-                    val stepDur = parseDurationSeconds(stepDto.staticDuration)
-                    RaahiRouteStep(
-                        instruction = stepDto.navigationInstruction?.instructions ?: "Continue",
-                        distanceMeters = stepDist,
-                        durationSeconds = stepDur,
-                        startLocation = stepDto.startLocation?.latLng?.let { LatLngPoint(it.latitude, it.longitude) } ?: origin,
-                        endLocation = stepDto.endLocation?.latLng?.let { LatLngPoint(it.latitude, it.longitude) } ?: destination
-                    )
-                } ?: emptyList()
-            )
-        } ?: emptyList()
-
-        return RaahiRoute(
-            id = "route_google_${index}_${System.currentTimeMillis()}",
-            title = routeTitle,
-            summary = routeDto.description ?: "Via Karachi Main Arteries",
-            origin = origin,
-            destination = destination,
-            originName = originName,
-            destinationName = destinationName,
-            distanceMeters = distanceMeters,
-            durationSeconds = durationSeconds,
-            formattedDistance = formatDistance(distanceMeters),
-            formattedDuration = formatDuration(durationSeconds),
-            polylinePoints = decodedPoints,
-            encodedPolyline = encodedPoly,
-            legs = legs,
-            warnings = routeDto.warnings ?: emptyList(),
-            metadata = mapOf("provider" to "Google")
         )
     }
 
@@ -588,6 +446,14 @@ class RouteRepositoryImpl(
         return (r * c).toInt()
     }
 
+    private fun logInfo(tag: String, msg: String) {
+        try {
+            Log.i(tag, msg)
+        } catch (e: Throwable) {
+            println("INFO: [$tag] $msg")
+        }
+    }
+
     private fun logWarn(tag: String, msg: String) {
         try {
             Log.w(tag, msg)
@@ -628,31 +494,12 @@ class RouteRepositoryImpl(
         return retrofit.create(TomTomRoutingApiService::class.java)
     }
 
-    private fun createDefaultGoogleApiService(): GoogleRoutesApiService {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
-
-        val okHttpClient = OkHttpClient.Builder()
-            .addInterceptor(logging)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
-            .build()
-
-        val moshi = Moshi.Builder()
-            .add(KotlinJsonAdapterFactory())
-            .build()
-
-        val retrofit = Retrofit.Builder()
-            .baseUrl("https://routes.googleapis.com/")
-            .client(okHttpClient)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
-            .build()
-
-        return retrofit.create(GoogleRoutesApiService::class.java)
-    }
-
     companion object {
         private const val TAG = "RouteRepositoryImpl"
+        private val KNOWN_INVALID_DEMO_KEYS = setOf(
+            "YOUR_TOMTOM_API_KEY",
+            "DUMMY_KEY",
+            "CHANGEME"
+        )
     }
 }

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -18,6 +20,28 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // Real TomTom API Key is loaded from local.properties (gitignored) or project properties / env vars
+    val localProperties = Properties().apply {
+      val localPropsFile = rootProject.file("local.properties")
+      if (localPropsFile.exists()) {
+        localPropsFile.inputStream().use { load(it) }
+      }
+      val envFile = rootProject.file(".env")
+      if (envFile.exists()) {
+        envFile.inputStream().use { load(it) }
+      } else {
+        val envExampleFile = rootProject.file(".env.example")
+        if (envExampleFile.exists()) {
+          envExampleFile.inputStream().use { load(it) }
+        }
+      }
+    }
+    val tomtomApiKey = project.findProperty("TOMTOM_API_KEY") as String?
+      ?: localProperties.getProperty("TOMTOM_API_KEY")
+      ?: System.getenv("TOMTOM_API_KEY")
+      ?: ""
+    buildConfigField("String", "TOMTOM_API_KEY", "\"$tomtomApiKey\"")
   }
 
   signingConfigs {

@@ -35,7 +35,6 @@ class RouteRepositoryTest {
     fun `calculates realistic Karachi routes with duration and distance via fallback`() = runTest(testDispatcher) {
         val fallbackRepo = RouteRepositoryImpl(
             customTomTomApiKey = "",
-            customGoogleApiKey = "",
             ioDispatcher = testDispatcher
         )
         val clifton = LatLngPoint(24.8138, 67.0300)
@@ -186,7 +185,6 @@ class RouteRepositoryTest {
     fun `generates valid polyline points for general Karachi locations`() = runTest(testDispatcher) {
         val fallbackRepo = RouteRepositoryImpl(
             customTomTomApiKey = "",
-            customGoogleApiKey = "",
             ioDispatcher = testDispatcher
         )
         val origin = LatLngPoint(24.8021, 67.0654) // DHA Phase 6
@@ -199,5 +197,69 @@ class RouteRepositoryTest {
         assertNotNull(routes)
         assertTrue(routes!!.isNotEmpty())
         assertTrue(routes[0].polylinePoints.isNotEmpty())
+    }
+
+    @Test
+    fun `verifies TomTom returns detailed road polyline points compared to synthetic fallback`() = runTest(testDispatcher) {
+        val detailedPoints = (0..24).map { i ->
+            TomTomPointDto(24.8138 + i * 0.002, 67.0300 + i * 0.001)
+        }
+
+        val mockTomTomApi = object : TomTomRoutingApiService {
+            override suspend fun calculateRoute(
+                locations: String,
+                apiKey: String,
+                maxAlternatives: Int,
+                routeType: String,
+                traffic: Boolean,
+                travelMode: String,
+                instructionsType: String
+            ): Response<TomTomRouteResponseDto> {
+                return Response.success(
+                    TomTomRouteResponseDto(
+                        routes = listOf(
+                            TomTomCalculatedRouteDto(
+                                summary = TomTomRouteSummaryDto(6000, 720),
+                                legs = listOf(
+                                    TomTomLegDto(
+                                        summary = TomTomRouteSummaryDto(6000, 720),
+                                        points = detailedPoints
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            }
+        }
+
+        val tomtomRepo = RouteRepositoryImpl(
+            tomTomApiService = mockTomTomApi,
+            customTomTomApiKey = "valid_tomtom_api_key",
+            ioDispatcher = testDispatcher
+        )
+
+        val fallbackRepo = RouteRepositoryImpl(
+            customTomTomApiKey = "YOUR_TOMTOM_API_KEY",
+            ioDispatcher = testDispatcher
+        )
+
+        val origin = LatLngPoint(24.8138, 67.0300)
+        val destination = LatLngPoint(24.8607, 67.0104)
+
+        val tomtomResult = tomtomRepo.getRouteOptions(origin, destination, "Clifton", "Saddar")
+        val fallbackResult = fallbackRepo.getRouteOptions(origin, destination, "Clifton", "Saddar")
+
+        assertTrue(tomtomResult.isSuccess)
+        assertTrue(fallbackResult.isSuccess)
+
+        val tomtomRoute = tomtomResult.getOrNull()!![0]
+        val fallbackRoute = fallbackResult.getOrNull()!![0]
+
+        assertEquals("TomTom", tomtomRoute.metadata["provider"])
+        assertEquals("KarachiCorridorEngine", fallbackRoute.metadata["provider"])
+
+        assertEquals(25, tomtomRoute.polylinePoints.size)
+        assertTrue(tomtomRoute.polylinePoints.size > fallbackRoute.polylinePoints.size)
     }
 }

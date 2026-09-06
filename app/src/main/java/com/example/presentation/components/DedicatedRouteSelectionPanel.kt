@@ -272,15 +272,43 @@ fun DedicatedRouteSelectionPanel(
 
                             Spacer(modifier = Modifier.height(2.dp))
 
-                            Text(
-                                text = route.title,
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    fontWeight = FontWeight.Medium,
-                                    fontSize = 12.sp
-                                ),
-                                color = OnSurfaceLight,
-                                maxLines = 1
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                val provider = route.metadata["provider"] ?: "Unknown"
+                                val isTomTom = provider == "TomTom"
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (isTomTom) Color(0xFFE3F2FD) else Color(0xFFFFF3E0))
+                                        .border(
+                                            width = 0.5.dp,
+                                            color = if (isTomTom) Color(0xFF1976D2) else Color(0xFFE65100),
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = if (isTomTom) "TomTom GPS" else "Fallback Engine",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontSize = 8.sp,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        color = if (isTomTom) Color(0xFF1565C0) else Color(0xFFE65100)
+                                    )
+                                }
+
+                                Text(
+                                    text = route.title,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.sp
+                                    ),
+                                    color = OnSurfaceLight,
+                                    maxLines = 1
+                                )
+                            }
                         }
 
                         // Right: Safety Score Badge (Clickable to open Explain WHY)
